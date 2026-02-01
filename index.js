@@ -38,53 +38,50 @@ app.get("/telegram", (_req, res) => {
 // =====================
 // TELEGRAM WEBHOOK
 // =====================
-app.post("/telegram", (req, res) => {
-  // ✅ Respond immediately so Telegram marks webhook delivery as successful
+app.post("/telegram", async (req, res) => {
+  // ✅ IMMEDIATELY ACK TELEGRAM
   res.sendStatus(200);
 
-  // Process update async (so we never block Telegram)
-  handleTelegramUpdate(req.body).catch((err) => {
-    console.error("handleTelegramUpdate error:", err);
-  });
-});
+  try {
+    const message = req.body.message;
+    if (!message || !message.text) return;
 
-async function handleTelegramUpdate(update) {
-  const message = update?.message;
-  if (!message) return;
+    const chatId = message.chat.id;
+    const text = message.text.trim();
 
-  const chatId = message.chat?.id;
-  const text = message.text?.trim();
-  if (!chatId || !text) return;
+    // ---------- COMMANDS ----------
+    if (text === "/start") {
+      await sendTelegram(chatId, "👋 Welcome to Moltbøt! I’m alive and listening.");
+      return;
+    }
 
-  // ---------- COMMANDS ----------
-  if (text === "/start") {
-    await sendTelegram(chatId, "👋 Welcome to Moltbøt! I’m alive and listening.");
-    return;
-  }
-
-  if (text === "/help") {
-    await sendTelegram(
-      chatId,
-      `📖 Commands:
+    if (text === "/help") {
+      await sendTelegram(
+        chatId,
+        `📖 Commands:
 • /start – start the bot
 • /help – see commands
 • /log <text> – log a message
 Or just ask me anything 🙂`
-    );
-    return;
-  }
+      );
+      return;
+    }
 
-  if (text.startsWith("/log ")) {
-    const logText = text.slice(5);
-    console.log("USER LOG:", logText);
-    await sendTelegram(chatId, `📝 Logged: "${logText}"`);
-    return;
-  }
+    if (text.startsWith("/log ")) {
+      const logText = text.replace("/log ", "");
+      console.log("USER LOG:", logText);
+      await sendTelegram(chatId, `📝 Logged: "${logText}"`);
+      return;
+    }
 
-  // ---------- AI CHAT ----------
-  const aiReply = await askOpenAI(text);
-  await sendTelegram(chatId, aiReply);
-}
+    // ---------- AI CHAT ----------
+    const aiReply = await askOpenAI(text);
+    await sendTelegram(chatId, aiReply);
+
+  } catch (err) {
+    console.error("Telegram handler error:", err);
+  }
+});
 
 // =====================
 // OPENAI CALL
