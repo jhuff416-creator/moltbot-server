@@ -8,7 +8,7 @@ app.use(express.json());
  * Health check
  */
 app.get("/", (req, res) => {
-  res.send("Moltb0t server is running ✅");
+  res.send("Moltbot server is running ✅");
 });
 
 /**
@@ -25,7 +25,7 @@ app.post("/telegram", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    const responseText = `Moltb0t heard you say: "${text}" ✅`;
+    const responseText = `Moltbot heard you say: "${text}" ✅`;
 
     await fetch(
       `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
@@ -41,7 +41,7 @@ app.post("/telegram", async (req, res) => {
 
     return res.sendStatus(200);
   } catch (err) {
-    console.error("Telegram webhook error:", err);
+    console.error("Telegram error:", err);
     return res.sendStatus(200);
   }
 });
