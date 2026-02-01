@@ -1,4 +1,5 @@
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
@@ -19,6 +20,7 @@ app.post("/telegram", async (req, res) => {
     const chatId = message?.chat?.id;
     const text = message?.text;
 
+    // Ignore non-text messages
     if (!chatId || !text) {
       return res.sendStatus(200);
     }
@@ -39,7 +41,7 @@ app.post("/telegram", async (req, res) => {
 
     return res.sendStatus(200);
   } catch (err) {
-    console.error("Telegram error:", err);
+    console.error("Telegram webhook error:", err);
     return res.sendStatus(200);
   }
 });
