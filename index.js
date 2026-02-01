@@ -7,7 +7,6 @@ app.get("/", (req, res) => {
   res.send("Moltbot server is running ✅");
 });
 
-app.post("/telegram", (req, res) => {
 app.post("/telegram", async (req, res) => {
   try {
     const message = req.body.message;
@@ -28,6 +27,13 @@ app.post("/telegram", async (req, res) => {
         text: responseText,
       }),
     });
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Telegram error:", err);
+    res.sendStatus(200);
+  }
+});
 
     res.sendStatus(200);
   } catch (err) {
