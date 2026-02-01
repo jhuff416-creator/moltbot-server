@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
@@ -20,7 +19,6 @@ app.post("/telegram", async (req, res) => {
     const chatId = message?.chat?.id;
     const text = message?.text;
 
-    // Ignore non-text messages
     if (!chatId || !text) {
       return res.sendStatus(200);
     }
@@ -31,9 +29,7 @@ app.post("/telegram", async (req, res) => {
       `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id: chatId,
           text: responseText,
