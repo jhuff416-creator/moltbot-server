@@ -29,6 +29,9 @@ if (text === "/start") {
   responseText = "👋 Welcome to Moltbot! I'm alive and listening.";
 } else if (text === "/help") {
   responseText = "Commands:\n/start – start the bot\n/help – see commands";
+} else if (text.startsWith("/log ")) {
+  const entry = text.replace("/log ", "");
+  responseText = `📝 Logged: "${entry}"`;
 } else {
   responseText = `Moltbot heard you say: "${text}" ✅`;
 }
