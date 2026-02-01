@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 import OpenAI from "openai";
 
 const app = express();
@@ -8,11 +7,12 @@ app.use(express.json());
 // =====================
 // ENV VALIDATION
 // =====================
-const PORT = process.env.PORT || 8080;
-
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const {
+  TELEGRAM_BOT_TOKEN,
+  OPENAI_API_KEY,
+  OPENAI_MODEL = "gpt-4.1-mini",
+  PORT = 8080,
+} = process.env;
 
 if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
 if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
@@ -23,47 +23,30 @@ if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // =====================
-// HEALTH CHECKS
+// HEALTH CHECK
 // =====================
+app.get("/", (_req, res) => res.status(200).send("Moltbøt is alive ✅"));
 
-// Simple health check
-app.get("/", (_req, res) => {
-  res.status(200).send("Moltbøt is alive ✅");
-});
-
-// IMPORTANT: Telegram sometimes “checks” your webhook URL.
-// Also your browser uses GET when you visit it.
-// If GET /telegram is missing, you’ll see 404s.
-app.get("/telegram", (_req, res) => {
-  res.status(200).send("Telegram webhook OK ✅ (GET)");
-});
+// Handy for browser testing (Telegram uses POST, but you can GET this)
+app.get("/telegram", (_req, res) =>
+  res.status(200).send("Telegram webhook endpoint OK ✅ (POST me)")
+);
 
 // =====================
 // TELEGRAM WEBHOOK (POST)
 // =====================
 app.post("/telegram", async (req, res) => {
-  // ✅ Respond immediately so Telegram is happy
+  // IMPORTANT: acknowledge Telegram immediately
   res.sendStatus(200);
 
   try {
-    // Telegram sends various update shapes (message, edited_message, etc.)
-    const update = req.body;
-    const message = update.message || update.edited_message;
-
-    if (!message) {
-      console.log("No message in update (ignored).");
-      return;
-    }
+    const message = req.body?.message;
+    if (!message) return;
 
     const chatId = message.chat?.id;
     const text = message.text?.trim();
 
-    if (!chatId || !text) {
-      console.log("Missing chatId or text (ignored).");
-      return;
-    }
-
-    console.log("Incoming message:", { chatId, text });
+    if (!chatId || !text) return;
 
     // ---------- COMMANDS ----------
     if (text === "/start") {
@@ -84,7 +67,7 @@ Or just ask me anything 🙂`
     }
 
     if (text.startsWith("/log ")) {
-      const logText = text.slice(5).trim();
+      const logText = text.slice(5);
       console.log("USER LOG:", logText);
       await sendTelegram(chatId, `📝 Logged: "${logText}"`);
       return;
@@ -95,7 +78,11 @@ Or just ask me anything 🙂`
     await sendTelegram(chatId, aiReply);
   } catch (err) {
     console.error("Telegram handler error:", err);
-    // We already returned 200 to Telegram, so just log it.
+    // Try to notify user (best effort)
+    try {
+      const chatId = req.body?.message?.chat?.id;
+      if (chatId) await sendTelegram(chatId, "⚠️ Bot error. Check Railway logs.");
+    } catch (_) {}
   }
 });
 
@@ -103,52 +90,41 @@ Or just ask me anything 🙂`
 // OPENAI CALL
 // =====================
 async function askOpenAI(userText) {
-  try {
-    const response = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: "system", content: "You are Moltbøt, a helpful Telegram assistant." },
-        { role: "user", content: userText },
-      ],
-    });
+  const response = await openai.chat.completions.create({
+    model: OPENAI_MODEL,
+    messages: [
+      { role: "system", content: "You are Moltbøt, a helpful Telegram assistant." },
+      { role: "user", content: userText },
+    ],
+  });
 
-    const msg = response?.choices?.[0]?.message?.content?.trim();
-    return msg || "🤖 I’m not sure what to say — try again?";
-  } catch (err) {
-    console.error("OpenAI error:", err?.message || err);
-    return "⚠️ Sorry — I hit an error talking to OpenAI. Check Railway logs.";
-  }
+  const content = response?.choices?.[0]?.message?.content;
+  return (content || "⚠️ No response from model. Try again.").trim();
 }
 
 // =====================
 // TELEGRAM SEND
 // =====================
 async function sendTelegram(chatId, text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const resp = await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    }
+  );
 
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-    }),
-  });
-
-  const data = await resp.json().catch(() => null);
-
-  if (!resp.ok || !data?.ok) {
-    console.error("Telegram send failed:", {
-      status: resp.status,
-      data,
-    });
+  // Helpful debug if Telegram rejects the request
+  if (!resp.ok) {
+    const body = await resp.text();
+    console.error("Telegram sendMessage failed:", resp.status, body);
   }
 }
 
 // =====================
 // START SERVER
 // =====================
-app.listen(PORT, () => {
+app.listen(Number(PORT), () => {
   console.log(`🚀 Moltbøt running on port ${PORT}`);
-  console.log(`Model: ${OPENAI_MODEL}`);
 });
