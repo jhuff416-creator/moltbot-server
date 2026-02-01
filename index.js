@@ -7,7 +7,7 @@ app.get("/", (req, res) => {
   res.send("Moltbot server is running ✅");
 });
 
-app.post("/telegram", async (req, res) => {
+await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
   try {
     const message = req.body.message;
     const chatId = message?.chat?.id;
