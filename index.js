@@ -23,7 +23,16 @@ app.post("/telegram", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    const responseText = `Moltbot heard you say: "${text}" ✅`;
+    let responseText;
+
+if (text === "/start") {
+  responseText = "👋 Welcome to Moltbot! I'm alive and listening.";
+} else if (text === "/help") {
+  responseText = "Commands:\n/start – start the bot\n/help – see commands";
+} else {
+  responseText = `Moltbot heard you say: "${text}" ✅`;
+}
+
 
     await fetch(
       `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
