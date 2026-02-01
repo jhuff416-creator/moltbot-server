@@ -1,12 +1,8 @@
 {
-  "name": "moltbot-server",
+  "name": "moltb0t-server",
   "version": "1.0.0",
-  {
+  "description": "Telegram bot powered by OpenAI",
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  }
-}
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -16,6 +12,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "openai": "^4.0.0"
+    "node-fetch": "^3.3.2",
+    "openai": "^4.29.2"
   }
 }
