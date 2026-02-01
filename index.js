@@ -4,99 +4,97 @@ import OpenAI from "openai";
 const app = express();
 app.use(express.json());
 
-// ENV VARS (set these in Railway -> Variables)
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+// ===== Required environment variables (Railway Variables) =====
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN (Railway Variable)");
-if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY (Railway Variable)");
+if (!TELEGRAM_BOT_TOKEN) {
+  console.error("❌ Missing TELEGRAM_BOT_TOKEN in Railway Variables");
+  process.exit(1);
+}
 
-// OpenAI client
+if (!OPENAI_API_KEY) {
+  console.error("❌ Missing OPENAI_API_KEY in Railway Variables");
+  process.exit(1);
+}
+
+// ===== OpenAI client =====
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-/** Health check */
-app.get("/", (req, res) => {
-  res.status(200).send("Moltbot server is running ✅");
-});
+// ===== Health checks =====
+app.get("/", (req, res) => res.status(200).send("Moltbot server is running ✅"));
+app.get("/telegram", (req, res) =>
+  res.status(200).send("Telegram webhook endpoint live ✅ (POST only)")
+);
 
-/** Optional: so visiting /telegram in browser doesn't confuse you */
-app.get("/telegram", (req, res) => {
-  res
-    .status(200)
-    .send("Telegram webhook endpoint OK ✅ (Telegram will POST here)");
-});
-
-/** Telegram webhook endpoint (Telegram POSTs updates here) */
+// ===== Telegram webhook endpoint =====
 app.post("/telegram", async (req, res) => {
   try {
     const message = req.body?.message;
     const chatId = message?.chat?.id;
     const text = message?.text;
 
-    // Ignore non-message updates safely
+    // Telegram sends other updates too (edited_message, etc). Ignore safely.
     if (!chatId || !text) return res.sendStatus(200);
 
-    // Commands
+    // Basic commands
     if (text === "/start") {
-      await sendTelegramMessage(chatId, "👋 Welcome to Moltbot! I'm alive.");
+      await sendTelegramMessage(chatId, "👋 Welcome to Moltbot! Ask me anything.");
       return res.sendStatus(200);
     }
 
     if (text === "/help") {
       await sendTelegramMessage(
         chatId,
-        "Commands:\n/start - start the bot\n/help - show commands\n\nSend any message to talk to OpenAI."
+        "Commands:\n/start - start the bot\n/help - see commands\n\nOr just type a message and I’ll respond using OpenAI."
       );
       return res.sendStatus(200);
     }
 
-    // Everything else -> OpenAI
-    const reply = await askOpenAI(text);
-
+    // Use OpenAI for normal messages
+    const reply = await getOpenAIReply(text);
     await sendTelegramMessage(chatId, reply);
+
     return res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook error:", err);
-    return res.sendStatus(200);
+    console.error("❌ Webhook handler error:", err);
+    return res.sendStatus(200); // Always 200 to avoid Telegram retries storms
   }
 });
 
-/** Sends a message back to Telegram */
+// ===== Helper: send message back to Telegram =====
 async function sendTelegramMessage(chatId, text) {
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
 
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-    }),
+    body: JSON.stringify({ chat_id: chatId, text })
   });
 
   if (!resp.ok) {
     const body = await resp.text();
-    console.error("Telegram sendMessage failed:", resp.status, body);
+    console.error("❌ Telegram sendMessage failed:", resp.status, body);
   }
 }
 
-/** Calls OpenAI and returns the model's reply */
-async function askOpenAI(userText) {
+// ===== Helper: OpenAI response =====
+async function getOpenAIReply(userText) {
   const response = await openai.responses.create({
     model: "gpt-4.1-mini",
     input: [
       {
         role: "system",
         content:
-          "You are Moltbot, a helpful assistant inside Telegram. Be concise and friendly.",
+          "You are Moltbot, a helpful assistant inside Telegram. Reply clearly, friendly, and concise."
       },
-      { role: "user", content: userText },
-    ],
+      { role: "user", content: userText }
+    ]
   });
 
-  return response.output_text || "I couldn't generate a reply that time.";
+  return response.output_text || "Sorry — I couldn’t generate a response.";
 }
 
-/** Start server */
+// ===== Start server (Railway provides PORT) =====
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
