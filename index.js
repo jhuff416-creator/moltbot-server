@@ -1,62 +1,67 @@
 import express from "express";
-import fetch from "node-fetch";
 import OpenAI from "openai";
 
 const app = express();
 app.use(express.json());
 
 // =====================
-// ENV VALIDATION
+// ENV
 // =====================
-const {
-  TELEGRAM_BOT_TOKEN,
-  OPENAI_API_KEY,
-  OPENAI_MODEL = "gpt-4.1-mini",
-  PORT = 8080,
-} = process.env;
+const PORT = process.env.PORT || 8080;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
-if (!TELEGRAM_BOT_TOKEN) {
-  throw new Error("Missing TELEGRAM_BOT_TOKEN");
+// Instead of throwing (which kills Railway), we log clearly.
+// Railway logs will show you immediately what's missing.
+function envStatus() {
+  return {
+    hasTelegramToken: Boolean(TELEGRAM_BOT_TOKEN),
+    hasOpenAIKey: Boolean(OPENAI_API_KEY),
+    model: OPENAI_MODEL,
+    port: PORT,
+  };
 }
 
-if (!OPENAI_API_KEY) {
-  throw new Error("Missing OPENAI_API_KEY");
-}
-
 // =====================
-// OPENAI CLIENT
+// OPENAI CLIENT (only if key exists)
 // =====================
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-});
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
 // =====================
 // HEALTH CHECK
 // =====================
 app.get("/", (_req, res) => {
-  res.send("Moltbøt is alive ✅");
+  res.json({
+    ok: true,
+    message: "Moltbøt is alive ✅",
+    env: envStatus(),
+  });
 });
 
 // =====================
 // TELEGRAM WEBHOOK
 // =====================
 app.post("/telegram", async (req, res) => {
+  // IMPORTANT: Respond immediately so Telegram doesn't time out/retry
+  res.sendStatus(200);
+
   try {
-    const message = req.body.message;
-    if (!message) return res.sendStatus(200);
+    const message = req.body?.message;
+    if (!message) return;
 
-    const chatId = message.chat.id;
+    const chatId = message.chat?.id;
     const text = message.text?.trim();
-
-    if (!text) return res.sendStatus(200);
+    if (!chatId || !text) return;
 
     // ---------- COMMANDS ----------
     if (text === "/start") {
-      return sendTelegram(chatId, "👋 Welcome to Moltbøt! I’m alive and listening.");
+      await sendTelegram(chatId, "👋 Welcome to Moltbøt! I’m alive and listening.");
+      return;
     }
 
     if (text === "/help") {
-      return sendTelegram(
+      await sendTelegram(
         chatId,
         `📖 Commands:
 • /start – start the bot
@@ -64,20 +69,34 @@ app.post("/telegram", async (req, res) => {
 • /log <text> – log a message
 Or just ask me anything 🙂`
       );
+      return;
     }
 
     if (text.startsWith("/log ")) {
-      const logText = text.replace("/log ", "");
+      const logText = text.slice(5);
       console.log("USER LOG:", logText);
-      return sendTelegram(chatId, `📝 Logged: "${logText}"`);
+      await sendTelegram(chatId, `📝 Logged: "${logText}"`);
+      return;
+    }
+
+    // ---------- SAFETY CHECKS ----------
+    if (!TELEGRAM_BOT_TOKEN) {
+      console.error("Missing TELEGRAM_BOT_TOKEN env var");
+      await sendTelegram(chatId, "⚠️ Server missing TELEGRAM_BOT_TOKEN in Railway Variables.");
+      return;
+    }
+
+    if (!OPENAI_API_KEY || !openai) {
+      console.error("Missing OPENAI_API_KEY env var");
+      await sendTelegram(chatId, "⚠️ Server missing OPENAI_API_KEY in Railway Variables.");
+      return;
     }
 
     // ---------- AI CHAT ----------
     const aiReply = await askOpenAI(text);
-    return sendTelegram(chatId, aiReply);
+    await sendTelegram(chatId, aiReply);
   } catch (err) {
     console.error("Telegram handler error:", err);
-    return res.sendStatus(200);
   }
 });
 
@@ -94,10 +113,11 @@ async function askOpenAI(userText) {
       ],
     });
 
-    return response.choices[0].message.content.trim();
+    return response.choices?.[0]?.message?.content?.trim() || "🤖 (No response text)";
   } catch (err) {
-    console.error("OpenAI error:", err);
-    return "⚠️ I had trouble thinking just now. Try again in a moment.";
+    // This prints the real OpenAI error into Railway logs
+    console.error("OpenAI error:", err?.response?.data || err);
+    return "⚠️ I hit an error talking to OpenAI. Check Railway logs.";
   }
 }
 
@@ -105,17 +125,24 @@ async function askOpenAI(userText) {
 // TELEGRAM SEND
 // =====================
 async function sendTelegram(chatId, text) {
-  await fetch(
-    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-      }),
-    }
-  );
+  if (!TELEGRAM_BOT_TOKEN) {
+    console.error("Cannot sendTelegram: TELEGRAM_BOT_TOKEN missing");
+    return;
+  }
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  // Node 18+ has fetch built-in (no node-fetch dependency needed)
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text }),
+  });
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    console.error("Telegram sendMessage failed:", resp.status, body);
+  }
 }
 
 // =====================
@@ -123,38 +150,5 @@ async function sendTelegram(chatId, text) {
 // =====================
 app.listen(PORT, () => {
   console.log(`🚀 Moltbøt running on port ${PORT}`);
-});
-    }),
-  });
-}
-
-async function askOpenAI(userText) {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_KEY}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are Moltbot, a helpful Telegram assistant." },
-        { role: "user", content: userText },
-      ],
-    }),
-  });
-
-  const data = await response.json();
-
-  if (data.error) {
-    console.error("OpenAI error:", data.error);
-    return "⚠️ OpenAI error. Check logs or billing.";
-  }
-
-  return data.choices[0].message.content;
-}
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Env status:", envStatus());
 });
