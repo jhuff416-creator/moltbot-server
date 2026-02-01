@@ -1,29 +1,64 @@
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
 
-// --- Environment variables (Railway Variables) ---
-const TELEGRAM_BOT_TOKEN =
-  process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN; // supports either name
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-// Fail fast if missing required secrets
-if (!TELEGRAM_BOT_TOKEN) {
-  throw new Error(
-    "Missing TELEGRAM_BOT_TOKEN (or BOT_TOKEN) in Railway Variables"
-  );
+if (!BOT_TOKEN) {
+  throw new Error("Missing TELEGRAM_BOT_TOKEN");
 }
-if (!OPENAI_API_KEY) {
-  throw new Error("Missing OPENAI_API_KEY in Railway Variables");
+if (!OPENAI_KEY) {
+  throw new Error("Missing OPENAI_API_KEY");
 }
 
-// --- Helpers ---
-async function telegramSendMessage(chatId, text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-  const resp = await fetch(url, {
+// Health check
+app.get("/", (req, res) => {
+  res.send("Moltb0t is running");
+});
+
+// Telegram webhook
+app.post("/telegram", async (req, res) => {
+  try {
+    const message = req.body.message;
+    if (!message || !message.text) {
+      return res.sendStatus(200);
+    }
+
+    const chatId = message.chat.id;
+    const text = message.text;
+
+    // Commands
+    if (text === "/start") {
+      await sendMessage(chatId, "👋 Welcome to Moltbot! I'm alive and listening.");
+      return res.sendStatus(200);
+    }
+
+    if (text === "/help") {
+      await sendMessage(
+        chatId,
+        "Commands:\n/start – start the bot\n/help – see commands\nJust type anything to talk to AI."
+      );
+      return res.sendStatus(200);
+    }
+
+    // Send message to OpenAI
+    const aiReply = await askOpenAI(text);
+    await sendMessage(chatId, aiReply);
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Bot error:", err);
+    res.sendStatus(200);
+  }
+});
+
+async function sendMessage(chatId, text) {
+  await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -31,111 +66,35 @@ async function telegramSendMessage(chatId, text) {
       text,
     }),
   });
-
-  const data = await resp.json();
-  if (!data.ok) {
-    console.error("Telegram sendMessage failed:", data);
-  }
 }
 
-async function openaiReply(userText) {
-  // OpenAI Responses API
-  const resp = await fetch("https://api.openai.com/v1/responses", {
+async function askOpenAI(userText) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      Authorization: `Bearer ${OPENAI_KEY}`,
     },
     body: JSON.stringify({
-      model: OPENAI_MODEL,
-      // "instructions" is like a system prompt
-      instructions:
-        "You are Moltbot, a helpful assistant inside Telegram. Keep replies concise and friendly.",
-      input: userText,
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You are Moltbot, a helpful Telegram assistant." },
+        { role: "user", content: userText },
+      ],
     }),
   });
 
-  const data = await resp.json();
+  const data = await response.json();
 
-  if (!resp.ok) {
-    console.error("OpenAI error:", data);
-    return "Sorry — I hit an error talking to OpenAI. Check Railway logs.";
+  if (data.error) {
+    console.error("OpenAI error:", data.error);
+    return "⚠️ OpenAI error. Check logs or billing.";
   }
 
-  // Responses API commonly returns text here:
-  // data.output_text is the easiest way when present
-  if (typeof data.output_text === "string" && data.output_text.trim()) {
-    return data.output_text.trim();
-  }
-
-  // Fallback: try to extract from output array if needed
-  try {
-    const maybeText =
-      data.output?.[0]?.content?.find((c) => c.type === "output_text")?.text;
-    if (maybeText) return maybeText.trim();
-  } catch (e) {
-    // ignore
-  }
-
-  return "I got a response, but couldn't read it. Check the OpenAI response format in logs.";
+  return data.choices[0].message.content;
 }
 
-// --- Routes ---
-app.get("/", (req, res) => {
-  res.send("Moltbot server is running ✅");
-});
-
-// Helpful sanity endpoint so visiting /telegram in the browser isn't confusing
-app.get("/telegram", (req, res) => {
-  res.status(200).send("Telegram webhook endpoint OK. Use POST here ✅");
-});
-
-// Telegram webhook (Telegram will POST updates here)
-app.post("/telegram", async (req, res) => {
-  try {
-    const message = req.body?.message;
-    const chatId = message?.chat?.id;
-    const text = message?.text;
-
-    // Always respond quickly to Telegram
-    res.sendStatus(200);
-
-    if (!chatId || !text) return;
-
-    // Commands
-    if (text === "/start") {
-      await telegramSendMessage(
-        chatId,
-        "👋 Welcome to Moltbot! I'm alive and listening."
-      );
-      await telegramSendMessage(chatId, 'Try /help or just type a message.');
-      return;
-    }
-
-    if (text === "/help") {
-      await telegramSendMessage(
-        chatId,
-        "Commands:\n/start - start the bot\n/help - see commands\n\nOr just type anything and I’ll reply using OpenAI."
-      );
-      return;
-    }
-
-    // Everything else -> OpenAI
-    const reply = await openaiReply(text);
-    await telegramSendMessage(chatId, reply);
-  } catch (err) {
-    console.error("Telegram webhook error:", err);
-
-    // If we haven't already responded, do it now
-    // (but in this code we respond immediately above)
-    try {
-      res.sendStatus(200);
-    } catch (_) {}
-  }
-});
-
-// --- Start server ---
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
