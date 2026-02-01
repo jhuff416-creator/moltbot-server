@@ -1,69 +1,129 @@
 import express from "express";
 import fetch from "node-fetch";
+import OpenAI from "openai";
 
 const app = express();
 app.use(express.json());
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
+// =====================
+// ENV VALIDATION
+// =====================
+const {
+  TELEGRAM_BOT_TOKEN,
+  OPENAI_API_KEY,
+  OPENAI_MODEL = "gpt-4.1-mini",
+  PORT = 8080,
+} = process.env;
 
-if (!BOT_TOKEN) {
+if (!TELEGRAM_BOT_TOKEN) {
   throw new Error("Missing TELEGRAM_BOT_TOKEN");
 }
-if (!OPENAI_KEY) {
+
+if (!OPENAI_API_KEY) {
   throw new Error("Missing OPENAI_API_KEY");
 }
 
-const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-// Health check
-app.get("/", (req, res) => {
-  res.send("Moltb0t is running");
+// =====================
+// OPENAI CLIENT
+// =====================
+const openai = new OpenAI({
+  apiKey: OPENAI_API_KEY,
 });
 
-// Telegram webhook
+// =====================
+// HEALTH CHECK
+// =====================
+app.get("/", (_req, res) => {
+  res.send("Moltbøt is alive ✅");
+});
+
+// =====================
+// TELEGRAM WEBHOOK
+// =====================
 app.post("/telegram", async (req, res) => {
   try {
     const message = req.body.message;
-    if (!message || !message.text) {
-      return res.sendStatus(200);
-    }
+    if (!message) return res.sendStatus(200);
 
     const chatId = message.chat.id;
-    const text = message.text;
+    const text = message.text?.trim();
 
-    // Commands
+    if (!text) return res.sendStatus(200);
+
+    // ---------- COMMANDS ----------
     if (text === "/start") {
-      await sendMessage(chatId, "👋 Welcome to Moltbot! I'm alive and listening.");
-      return res.sendStatus(200);
+      return sendTelegram(chatId, "👋 Welcome to Moltbøt! I’m alive and listening.");
     }
 
     if (text === "/help") {
-      await sendMessage(
+      return sendTelegram(
         chatId,
-        "Commands:\n/start – start the bot\n/help – see commands\nJust type anything to talk to AI."
+        `📖 Commands:
+• /start – start the bot
+• /help – see commands
+• /log <text> – log a message
+Or just ask me anything 🙂`
       );
-      return res.sendStatus(200);
     }
 
-    // Send message to OpenAI
-    const aiReply = await askOpenAI(text);
-    await sendMessage(chatId, aiReply);
+    if (text.startsWith("/log ")) {
+      const logText = text.replace("/log ", "");
+      console.log("USER LOG:", logText);
+      return sendTelegram(chatId, `📝 Logged: "${logText}"`);
+    }
 
-    res.sendStatus(200);
+    // ---------- AI CHAT ----------
+    const aiReply = await askOpenAI(text);
+    return sendTelegram(chatId, aiReply);
   } catch (err) {
-    console.error("Bot error:", err);
-    res.sendStatus(200);
+    console.error("Telegram handler error:", err);
+    return res.sendStatus(200);
   }
 });
 
-async function sendMessage(chatId, text) {
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
+// =====================
+// OPENAI CALL
+// =====================
+async function askOpenAI(userText) {
+  try {
+    const response = await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: "system", content: "You are Moltbøt, a helpful Telegram assistant." },
+        { role: "user", content: userText },
+      ],
+    });
+
+    return response.choices[0].message.content.trim();
+  } catch (err) {
+    console.error("OpenAI error:", err);
+    return "⚠️ I had trouble thinking just now. Try again in a moment.";
+  }
+}
+
+// =====================
+// TELEGRAM SEND
+// =====================
+async function sendTelegram(chatId, text) {
+  await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+      }),
+    }
+  );
+}
+
+// =====================
+// START SERVER
+// =====================
+app.listen(PORT, () => {
+  console.log(`🚀 Moltbøt running on port ${PORT}`);
+});
     }),
   });
 }
