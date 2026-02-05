@@ -1,9 +1,9 @@
 {
   "name": "moltbot-server",
   "version": "1.0.0",
-  "description": "Moltbot server for Telegram + OpenAI + Postgres",
-  "main": "index.js",
+  "description": "Moltbot Telegram webhook server (OpenAI + Postgres-ready)",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
@@ -11,11 +11,10 @@
     "node": ">=18"
   },
   "dependencies": {
-    "axios": "^1.6.7",
     "dotenv": "^16.4.5",
     "express": "^4.18.3",
+    "node-fetch": "^3.3.2",
     "openai": "^4.0.0",
-    "pg": "^8.12.0",
-    "telegraf": "^4.16.3"
+    "pg": "^8.12.0"
   }
 }
