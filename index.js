@@ -2,196 +2,184 @@ import express from "express";
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
-import OpenAI from "openai";
+import { fileURLToPath } from "url";
+import { Client as NotionClient } from "@notionhq/client";
 
-const app = express();
-app.use(express.json());
+/* ----------------------- ENV ----------------------- */
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = (process.env.OPENAI_MODEL || "gpt-4o-mini").trim();
+const {
+  TELEGRAM_BOT_TOKEN,
+  OPENAI_API_KEY,
+  OPENAI_MODEL = "gpt-4o-mini",
+  NOTION_TOKEN,
+  NOTION_DATABASE_ID
+} = process.env;
 
 if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
-if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
 
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+/* ----------------------- PATHS ----------------------- */
 
-// ----------------------
-// Persistent memory file
-// ----------------------
-const DATA_DIR = process.env.DATA_DIR || "/data"; // Railway volume mount path
-const MEMORY_PATH = path.join(DATA_DIR, "memory.json");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MEMORY_FILE = path.join(__dirname, "memory.json");
 
-function ensureMemoryFile() {
+/* ----------------------- MEMORY ----------------------- */
+
+let memory = [];
+
+if (fs.existsSync(MEMORY_FILE)) {
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    if (!fs.existsSync(MEMORY_PATH)) fs.writeFileSync(MEMORY_PATH, JSON.stringify({ facts: [] }, null, 2));
-  } catch (e) {
-    console.error("Memory init error:", e);
+    memory = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf-8"));
+  } catch {
+    memory = [];
   }
 }
 
-function loadMemory() {
-  ensureMemoryFile();
-  try {
-    const raw = fs.readFileSync(MEMORY_PATH, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed.facts || !Array.isArray(parsed.facts)) return { facts: [] };
-    return parsed;
-  } catch (e) {
-    console.error("Memory read error:", e);
-    return { facts: [] };
-  }
+function saveMemory() {
+  fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory, null, 2));
 }
 
-function saveMemory(memory) {
-  ensureMemoryFile();
-  try {
-    fs.writeFileSync(MEMORY_PATH, JSON.stringify(memory, null, 2));
-  } catch (e) {
-    console.error("Memory write error:", e);
-  }
-}
-
-function addFact(text) {
-  const memory = loadMemory();
-  const cleaned = text.trim();
-  if (!cleaned) return false;
-  if (!memory.facts.includes(cleaned)) {
-    memory.facts.push(cleaned);
-    // Keep it small (you can adjust)
-    if (memory.facts.length > 50) memory.facts = memory.facts.slice(-50);
-    saveMemory(memory);
-  }
-  return true;
-}
-
-function removeFact(matchText) {
-  const memory = loadMemory();
-  const q = matchText.trim().toLowerCase();
-  if (!q) return { removed: 0 };
-  const before = memory.facts.length;
-  memory.facts = memory.facts.filter(f => !f.toLowerCase().includes(q));
-  saveMemory(memory);
-  return { removed: before - memory.facts.length };
+function addMemory(text) {
+  const entry = {
+    text,
+    created_at: new Date().toISOString()
+  };
+  memory.push(entry);
+  saveMemory();
 }
 
 function memoryBlock() {
-  const memory = loadMemory();
-  if (!memory.facts.length) return "No saved memory yet.";
-  return memory.facts.map((f, i) => `${i + 1}. ${f}`).join("\n");
+  if (!memory.length) return "No memories yet.";
+  return memory.slice(-10).map(m => `• ${m.text}`).join("\n");
 }
 
-// ----------------------
-// Telegram helpers
-// ----------------------
-async function sendTelegramMessage(chatId, text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
+/* ----------------------- NOTION ----------------------- */
+
+const notion =
+  NOTION_TOKEN && NOTION_DATABASE_ID
+    ? new NotionClient({ auth: NOTION_TOKEN })
+    : null;
+
+function shortTitle(text, max = 60) {
+  const t = text.trim().replace(/\s+/g, " ");
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+}
+
+async function writeMemoryToNotion({ text, chatId }) {
+  if (!notion) return;
+
+  await notion.pages.create({
+    parent: { database_id: NOTION_DATABASE_ID },
+    properties: {
+      Name: {
+        title: [{ text: { content: shortTitle(text) } }]
+      },
+      Type: {
+        select: { name: "memory" }
+      },
+      Created: {
+        date: { start: new Date().toISOString() }
+      }
+    },
+    children: [
+      {
+        object: "block",
+        type: "paragraph",
+        paragraph: {
+          rich_text: [{ text: { content: text } }]
+        }
+      },
+      {
+        object: "block",
+        type: "paragraph",
+        paragraph: {
+          rich_text: [
+            { text: { content: `Source: Telegram chat ${chatId}` } }
+          ]
+        }
+      }
+    ]
+  });
+}
+
+/* ----------------------- TELEGRAM ----------------------- */
+
+async function sendTelegram(chatId, text) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text })
   });
 }
 
-function parseCommand(text) {
-  const trimmed = (text || "").trim();
-  const [cmd, ...rest] = trimmed.split(" ");
-  return { cmd: (cmd || "").toLowerCase(), arg: rest.join(" ").trim() };
-}
+/* ----------------------- OPENAI ----------------------- */
 
-// ----------------------
-// Main webhook
-// ----------------------
-app.post("/telegram", async (req, res) => {
-  try {
-    const update = req.body;
-
-    if (!update.message || !update.message.text) {
-      return res.sendStatus(200);
-    }
-
-    const chatId = update.message.chat.id;
-    const text = update.message.text;
-
-    const { cmd, arg } = parseCommand(text);
-
-    // Commands
-    if (cmd === "/start" || cmd === "/help") {
-      await sendTelegramMessage(
-        chatId,
-        [
-          "Commands:",
-          "/remember <text>  — save something long-term",
-          "/memory           — show what I remember",
-          "/forget <text>    — remove matching memory",
-          "",
-          "Or just ask me anything 🙂"
-        ].join("\n")
-      );
-      return res.sendStatus(200);
-    }
-
-    if (cmd === "/remember") {
-      if (!arg) {
-        await sendTelegramMessage(chatId, "Usage: /remember <something you want me to store>");
-        return res.sendStatus(200);
-      }
-      addFact(arg);
-      await sendTelegramMessage(chatId, `✅ Saved. I now remember:\n${memoryBlock()}`);
-      return res.sendStatus(200);
-    }
-
-    if (cmd === "/memory") {
-      await sendTelegramMessage(chatId, `🧠 Memory:\n${memoryBlock()}`);
-      return res.sendStatus(200);
-    }
-
-    if (cmd === "/forget") {
-      if (!arg) {
-        await sendTelegramMessage(chatId, "Usage: /forget <text to remove>");
-        return res.sendStatus(200);
-      }
-      const { removed } = removeFact(arg);
-      await sendTelegramMessage(chatId, removed ? `✅ Removed ${removed} item(s).` : "No matching memory found.");
-      return res.sendStatus(200);
-    }
-
-    // Normal chat: inject memory into the prompt
-    const mem = memoryBlock();
-
-    const systemPrompt = `
-You are Moltbot, Jeff's Telegram assistant.
-You should be helpful, clear, and action-oriented.
-
-Long-term memory (facts about Jeff). Use this when relevant:
-${mem}
-`.trim();
-
-    const completion = await openai.chat.completions.create({
+async function askAI(prompt) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
       model: OPENAI_MODEL,
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: text }
+        { role: "system", content: "You are Moltbot, a helpful AI assistant." },
+        {
+          role: "user",
+          content: `${prompt}\n\nRelevant memory:\n${memoryBlock()}`
+        }
       ]
-    });
+    })
+  });
 
-    const reply = completion.choices?.[0]?.message?.content?.trim() || "Sorry — I had trouble responding.";
-    await sendTelegramMessage(chatId, reply);
+  const json = await res.json();
+  return json.choices?.[0]?.message?.content || "No response.";
+}
 
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error("Webhook error:", err);
-    try {
-      const chatId = req.body?.message?.chat?.id;
-      if (chatId) await sendTelegramMessage(chatId, "⚠️ Error. Check Railway logs.");
-    } catch {}
+/* ----------------------- SERVER ----------------------- */
+
+const app = express();
+app.use(express.json());
+
+app.post("/webhook", async (req, res) => {
+  const msg = req.body.message;
+  if (!msg?.text) return res.sendStatus(200);
+
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+
+  // /remember command
+  if (text.startsWith("/remember")) {
+    const memoryText = text.replace("/remember", "").trim();
+    if (!memoryText) {
+      await sendTelegram(chatId, "Usage: /remember <something>");
+      return res.sendStatus(200);
+    }
+
+    addMemory(memoryText);
+    await writeMemoryToNotion({ text: memoryText, chatId });
+
+    await sendTelegram(
+      chatId,
+      `✅ Saved.\n\n🧠 Memory:\n${memoryBlock()}`
+    );
+
     return res.sendStatus(200);
   }
+
+  // Normal chat
+  const reply = OPENAI_API_KEY
+    ? await askAI(text)
+    : "AI not configured.";
+
+  await sendTelegram(chatId, reply);
+  res.sendStatus(200);
 });
 
-app.get("/", (req, res) => res.send("OK"));
-app.get("/health", (req, res) => res.send("healthy"));
+app.get("/", (_, res) => res.send("Moltbot is running"));
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`Moltbot running on port ${port}`));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`Moltbot running on port ${PORT}`);
+});
