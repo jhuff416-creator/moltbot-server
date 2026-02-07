@@ -1,13 +1,12 @@
 {
   "name": "moltbot-server",
   "version": "1.0.0",
-  "description": "Telegram AI assistant server for Moltbot",
+  "private": true,
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "18.x"
   }
 }
