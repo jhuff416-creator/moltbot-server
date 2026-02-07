@@ -1,16 +1,28 @@
 {
-  "name": "moltbot-server",
-  "version": "1.0.0",
-  "description": "Telegram AI bot with local + Notion memory",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
+  "app": {
+    "name": "moltbot",
+    "environment": "production",
+    "port": 8080
   },
-  "dependencies": {
-    "@notionhq/client": "^2.2.15",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
+
+  "telegram": {
+    "enabled": true
+  },
+
+  "openai": {
+    "enabled": true,
+    "model": "gpt-4o-mini"
+  },
+
+  "notion": {
+    "enabled": true
+  },
+
+  "database": {
+    "type": "postgres"
+  },
+
+  "logging": {
+    "level": "info"
   }
 }
