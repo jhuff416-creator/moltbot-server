@@ -1,81 +1,121 @@
-import express from "express";
-import TelegramBot from "node-telegram-bot-api";
+// ===============================
+// Moltbot – Railway Safe Index
+// CommonJS (NO import statements)
+// ===============================
 
-const app = express();
+const http = require("http");
+const https = require("https");
+const url = require("url");
 
-// Railway-provided port
+// ===============================
+// ENV VARIABLES
+// ===============================
 const PORT = process.env.PORT || 8080;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const NOTION_TOKEN = process.env.NOTION_TOKEN;
+const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 
-// ---- ENV ----
-const {
-  TELEGRAM_BOT_TOKEN,
-  OPENAI_API_KEY,
-  NOTION_TOKEN,
-  NOTION_DATABASE_ID
-} = process.env;
+// ===============================
+// BASIC LOG CHECK
+// ===============================
+console.log("🚀 Moltbot booting...");
+console.log("PORT:", PORT);
+console.log("Telegram token loaded:", !!TELEGRAM_BOT_TOKEN);
+console.log("OpenAI key loaded:", !!OPENAI_API_KEY);
+console.log("Notion token loaded:", !!NOTION_TOKEN);
+console.log("Notion DB loaded:", !!NOTION_DATABASE_ID);
 
-// ---- BASIC LOGGING ----
-console.log("🔧 Moltbot booting...");
-console.log("Node version:", process.version);
+// ===============================
+// SIMPLE TELEGRAM SEND MESSAGE
+// ===============================
+function sendTelegramMessage(chatId, text) {
+  if (!TELEGRAM_BOT_TOKEN) return;
 
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error("❌ TELEGRAM_BOT_TOKEN is missing");
-} else {
-  console.log("✅ Telegram token loaded");
-}
-
-if (!OPENAI_API_KEY) {
-  console.warn("⚠️ OPENAI_API_KEY missing (GPT disabled for now)");
-}
-
-// ---- EXPRESS HEALTH CHECK (REQUIRED FOR RAILWAY) ----
-app.get("/", (req, res) => {
-  res.status(200).send("Moltbot is alive 🧠⚡");
-});
-
-// ---- START SERVER ----
-app.listen(PORT, () => {
-  console.log(`🚀 Moltbot listening on port ${PORT}`);
-});
-
-// ---- TELEGRAM BOT ----
-let bot;
-
-try {
-  bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
-    polling: true
+  const payload = JSON.stringify({
+    chat_id: chatId,
+    text: text
   });
 
-  bot.on("message", async (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-
-    if (!text) return;
-
-    if (text === "/start") {
-      await bot.sendMessage(
-        chatId,
-        "🧠 Moltbot online.\nMemory + AI coming next."
-      );
-      return;
+  const options = {
+    hostname: "api.telegram.org",
+    path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload)
     }
+  };
 
-    // Temporary echo (safe baseline)
-    await bot.sendMessage(chatId, `Echo: ${text}`);
+  const req = https.request(options, res => {
+    res.on("data", () => {});
   });
 
-  console.log("🤖 Telegram bot started");
-} catch (err) {
-  console.error("❌ Failed to start Telegram bot:", err);
+  req.on("error", err => {
+    console.error("Telegram error:", err.message);
+  });
+
+  req.write(payload);
+  req.end();
 }
 
-// ---- GRACEFUL SHUTDOWN ----
-process.on("SIGTERM", () => {
-  console.log("🛑 SIGTERM received. Shutting down cleanly.");
-  process.exit(0);
+// ===============================
+// HTTP SERVER (REQUIRED BY RAILWAY)
+// ===============================
+const server = http.createServer((req, res) => {
+  const parsedUrl = url.parse(req.url, true);
+
+  // Health check
+  if (req.method === "GET" && parsedUrl.pathname === "/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({
+      status: "ok",
+      service: "moltbot",
+      time: new Date().toISOString()
+    }));
+  }
+
+  // Telegram webhook
+  if (req.method === "POST" && parsedUrl.pathname === "/telegram") {
+    let body = "";
+
+    req.on("data", chunk => {
+      body += chunk.toString();
+    });
+
+    req.on("end", () => {
+      try {
+        const update = JSON.parse(body);
+
+        if (update.message && update.message.text) {
+          const chatId = update.message.chat.id;
+          const text = update.message.text;
+
+          console.log("📩 Telegram message:", text);
+
+          sendTelegramMessage(chatId, `You said: ${text}`);
+        }
+
+        res.writeHead(200);
+        res.end("OK");
+      } catch (err) {
+        console.error("Webhook parse error:", err.message);
+        res.writeHead(400);
+        res.end("Bad Request");
+      }
+    });
+
+    return;
+  }
+
+  // Fallback
+  res.writeHead(404);
+  res.end("Not Found");
 });
 
-process.on("SIGINT", () => {
-  console.log("🛑 SIGINT received. Shutting down cleanly.");
-  process.exit(0);
+// ===============================
+// START SERVER
+// ===============================
+server.listen(PORT, () => {
+  console.log(`✅ Moltbot running on port ${PORT}`);
 });
