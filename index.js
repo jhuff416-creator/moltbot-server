@@ -1,84 +1,120 @@
 const express = require("express");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
 
-// ==============================
-// ENV
-// ==============================
+/* =========================
+   ENV
+========================= */
 const PORT = process.env.PORT || 8080;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PUBLIC_URL = process.env.PUBLIC_URL;
+const DATABASE_URL = process.env.DATABASE_URL;
 
-// ==============================
-// HEALTH CHECK
-// ==============================
+/* =========================
+   DATABASE
+========================= */
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+/* =========================
+   TELEGRAM HELPER
+========================= */
+async function sendTelegramMessage(chatId, text) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+    }),
+  });
+}
+
+/* =========================
+   HEALTH CHECK
+========================= */
 app.get("/", (req, res) => {
   res.send("Moltbot server running ✅");
 });
 
-// ==============================
-// WEBHOOK RECEIVER
-// ==============================
+/* =========================
+   TELEGRAM WEBHOOK
+========================= */
 app.post("/webhook", async (req, res) => {
-  const update = req.body;
-  console.log("Update received:", JSON.stringify(update, null, 2));
-
   try {
-    if (update.message && update.message.text) {
-      const chatId = update.message.chat.id;
-      const incomingText = update.message.text;
+    const update = req.body;
 
-      await fetch(
-        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text: `👋 Summit here.\n\nI received:\n"${incomingText}"`
-          })
-        }
-      );
+    const message = update.message?.text;
+    const chatId = update.message?.chat?.id?.toString();
+    const userId = update.message?.from?.id?.toString();
+
+    if (!message || !chatId || !userId) {
+      return res.sendStatus(200);
     }
 
+    /* =========================
+       /remember COMMAND
+    ========================= */
+    if (message.startsWith("/remember")) {
+      const memory = message.replace("/remember", "").trim();
+
+      if (!memory) {
+        await sendTelegramMessage(chatId, "Usage: /remember <something>");
+        return res.sendStatus(200);
+      }
+
+      await pool.query(
+        "insert into memories (user_id, chat_id, memory) values ($1,$2,$3)",
+        [userId, chatId, memory]
+      );
+
+      await sendTelegramMessage(chatId, `🧠 Saved: "${memory}"`);
+      return res.sendStatus(200);
+    }
+
+    /* =========================
+       /recall COMMAND
+    ========================= */
+    if (message.startsWith("/recall")) {
+      const result = await pool.query(
+        "select memory from memories where user_id = $1 order by created_at desc limit 5",
+        [userId]
+      );
+
+      if (result.rows.length === 0) {
+        await sendTelegramMessage(chatId, "No memories yet.");
+        return res.sendStatus(200);
+      }
+
+      const response = result.rows
+        .map((r, i) => `${i + 1}. ${r.memory}`)
+        .join("\n");
+
+      await sendTelegramMessage(chatId, `🧠 Your memories:\n${response}`);
+      return res.sendStatus(200);
+    }
+
+    /* =========================
+       DEFAULT RESPONSE
+    ========================= */
+    await sendTelegramMessage(chatId, "👋 Summit here. Message received.");
     res.sendStatus(200);
+
   } catch (err) {
     console.error("Webhook error:", err);
-    res.sendStatus(500);
+    res.sendStatus(200);
   }
 });
 
-// ==============================
-// ONE-TIME WEBHOOK SETUP
-// ==============================
-app.get("/setup-webhook", async (req, res) => {
-  if (!TELEGRAM_BOT_TOKEN || !PUBLIC_URL) {
-    return res
-      .status(500)
-      .send("Missing TELEGRAM_BOT_TOKEN or PUBLIC_URL");
-  }
-
-  const webhookUrl = `${PUBLIC_URL}/webhook`;
-
-  const response = await fetch(
-    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: webhookUrl })
-    }
-  );
-
-  const data = await response.json();
-  console.log("Webhook setup response:", data);
-
-  res.json(data);
-});
-
-// ==============================
-// START SERVER
-// ==============================
+/* =========================
+   START SERVER
+========================= */
 app.listen(PORT, () => {
-  console.log(`🚀 Moltbot running on port ${PORT}`);
+  console.log(`Server listening on ${PORT}`);
 });
