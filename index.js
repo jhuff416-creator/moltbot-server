@@ -1,5 +1,4 @@
 const express = require("express");
-const fetch = require("node-fetch");
 
 const app = express();
 app.use(express.json());
@@ -52,7 +51,6 @@ app.post("/webhook", async (req, res) => {
 
 // ==============================
 // ONE-TIME WEBHOOK SETUP
-// Visit this in your browser AFTER deploy
 // ==============================
 app.get("/setup-webhook", async (req, res) => {
   if (!TELEGRAM_BOT_TOKEN || !PUBLIC_URL) {
