@@ -1,28 +1,13 @@
 {
-  "app": {
-    "name": "moltbot",
-    "environment": "production",
-    "port": 8080
+  "name": "moltbot-server",
+  "version": "1.0.0",
+  "description": "Telegram AI assistant server for Moltbot",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
   },
-
-  "telegram": {
-    "enabled": true
-  },
-
-  "openai": {
-    "enabled": true,
-    "model": "gpt-4o-mini"
-  },
-
-  "notion": {
-    "enabled": true
-  },
-
-  "database": {
-    "type": "postgres"
-  },
-
-  "logging": {
-    "level": "info"
+  "engines": {
+    "node": ">=18"
   }
 }
