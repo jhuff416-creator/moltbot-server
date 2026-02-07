@@ -5,7 +5,6 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
-
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PUBLIC_URL = process.env.PUBLIC_URL;
 
@@ -18,7 +17,7 @@ app.get("/", (req, res) => {
 
 /**
  * One-time webhook setup
- * Visit this in your browser after deploy
+ * You visit this ONCE in your browser
  */
 app.get("/setup-webhook", async (req, res) => {
   if (!TELEGRAM_BOT_TOKEN || !PUBLIC_URL) {
@@ -27,34 +26,24 @@ app.get("/setup-webhook", async (req, res) => {
     });
   }
 
-  const webhookUrl = `${PUBLIC_URL}/telegram/webhook`;
-  const telegramUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook`;
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook`;
+  const webhookUrl = `${PUBLIC_URL}/webhook`;
 
-  try {
-    const response = await fetch(telegramUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: webhookUrl }),
-    });
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: webhookUrl }),
+  });
 
-    const data = await response.json();
-    res.json({
-      success: true,
-      webhook: webhookUrl,
-      telegramResponse: data,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const data = await response.json();
+  res.json(data);
 });
 
 /**
  * Telegram webhook receiver
  */
-app.post("/telegram/webhook", (req, res) => {
-  console.log("Telegram update received:");
-  console.log(JSON.stringify(req.body, null, 2));
-
+app.post("/webhook", (req, res) => {
+  console.log("Update received:", req.body);
   res.sendStatus(200);
 });
 
