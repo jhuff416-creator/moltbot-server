@@ -1,7 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
-const { Client } = require("@notionhq/client");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
@@ -12,50 +12,68 @@ app.use(express.json());
 const PORT = process.env.PORT || 8080;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PUBLIC_URL = process.env.PUBLIC_URL; // e.g. https://moltbot-server-production.up.railway.app
+const DATABASE_URL = process.env.DATABASE_URL;
 
-const NOTION_TOKEN = process.env.NOTION_TOKEN;
-const NOTION_DATABASE_ID_RAW = process.env.NOTION_DATABASE_ID;
+const ZAPIER_HOOK_URL = process.env.ZAPIER_HOOK_URL; // Zapier Catch Hook URL
+const ZAPIER_SECRET = process.env.ZAPIER_SECRET;     // Your shared secret for callback security
 
-// Basic validation (won’t crash deploy, but helps you debug quickly)
+const WORKER_INTERVAL_MS = Number(process.env.WORKER_INTERVAL_MS || 3000);
+
+// Basic validation (won’t crash deploy, but helps debug)
 if (!TELEGRAM_BOT_TOKEN) console.warn("⚠️ Missing TELEGRAM_BOT_TOKEN");
 if (!PUBLIC_URL) console.warn("⚠️ Missing PUBLIC_URL");
-if (!NOTION_TOKEN) console.warn("⚠️ Missing NOTION_TOKEN");
-if (!NOTION_DATABASE_ID_RAW) console.warn("⚠️ Missing NOTION_DATABASE_ID");
+if (!DATABASE_URL) console.warn("⚠️ Missing DATABASE_URL");
+if (!ZAPIER_HOOK_URL) console.warn("⚠️ Missing ZAPIER_HOOK_URL (Zapier tasks won't run)");
+if (!ZAPIER_SECRET) console.warn("⚠️ Missing ZAPIER_SECRET (callback auth weaker)");
 
-// If someone accidentally pastes a full Notion URL, this extracts the 32-hex ID safely.
-function normalizeNotionId(input) {
-  if (!input) return input;
-  const match = String(input).match(/[0-9a-fA-F]{32}/);
-  return match ? match[0] : input;
+// =========================
+// Postgres
+// =========================
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: DATABASE_URL ? { rejectUnauthorized: false } : undefined,
+});
+
+async function initDb() {
+  // Your existing memories table (keep it if you want)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS memories (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      text TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  // NEW: tasks table (Zapier-first)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'zapier',
+      input_text TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',  -- queued | running | done | failed
+      result_text TEXT,
+      error_text TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      started_at TIMESTAMPTZ,
+      finished_at TIMESTAMPTZ
+    );
+  `);
+
+  console.log("✅ DB initialized");
 }
-const NOTION_DATABASE_ID = normalizeNotionId(NOTION_DATABASE_ID_RAW);
-
-// =========================
-// Notion Client
-// =========================
-const notion = new Client({ auth: NOTION_TOKEN });
-
-// Your Notion database properties MUST match these names:
-// - Title (title property)  [can be named "Title" in Notion UI]
-// - Type (select)
-// - Created (date)
-// - Chat ID (number)
-// - Text (rich text)
-const PROP_TITLE = "Title";
-const PROP_TYPE = "Type";
-const PROP_CREATED = "Created";
-const PROP_CHAT_ID = "Chat ID";
-const PROP_TEXT = "Text";
 
 // =========================
 // Telegram Helpers
 // =========================
 async function telegramApi(method, payload) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
+
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
 
   const data = await res.json();
@@ -68,71 +86,84 @@ async function sendMessage(chatId, text) {
 }
 
 // =========================
-// Notion Helpers
+// Zapier Helper
 // =========================
-function makeTitleFromMemory(memoryText) {
-  const trimmed = memoryText.trim().replace(/\s+/g, " ");
-  // Notion titles can be long, but keep it tidy
-  return trimmed.length > 60 ? trimmed.slice(0, 57) + "…" : trimmed;
+async function sendToZapier(task) {
+  if (!ZAPIER_HOOK_URL) throw new Error("ZAPIER_HOOK_URL is not set");
+
+  // Send to Zapier Catch Hook
+  const payload = {
+    task_id: task.id,
+    chat_id: task.chat_id,
+    input_text: task.input_text,
+    created_at: task.created_at,
+    callback_url: PUBLIC_URL ? `${PUBLIC_URL}/zapier/callback` : null,
+  };
+
+  const res = await fetch(ZAPIER_HOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  // Zapier catch hook usually returns 200-ish quickly
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Zapier hook failed (${res.status}): ${txt}`);
+  }
 }
 
-async function notionCreateMemory({ chatId, memoryText }) {
-  // Store ONLY the memory text (per your request)
-  const title = makeTitleFromMemory(memoryText);
+// =========================
+// Task Worker (simple queue)
+// =========================
+let workerRunning = false;
 
-  return notion.pages.create({
-    parent: { database_id: NOTION_DATABASE_ID },
-    properties: {
-      [PROP_TITLE]: {
-        title: [{ text: { content: title } }]
-      },
-      [PROP_TYPE]: {
-        select: { name: "memory" }
-      },
-      [PROP_CREATED]: {
-        date: { start: new Date().toISOString() }
-      },
-      [PROP_CHAT_ID]: {
-        number: Number(chatId)
-      },
-      [PROP_TEXT]: {
-        rich_text: [{ text: { content: memoryText } }]
-      }
+async function runWorkerOnce() {
+  if (workerRunning) return;
+  workerRunning = true;
+
+  try {
+    // Pick the oldest queued task and lock it
+    const { rows } = await pool.query(`
+      SELECT id, chat_id, kind, input_text, created_at
+      FROM tasks
+      WHERE status = 'queued'
+      ORDER BY created_at ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    `);
+
+    if (rows.length === 0) return;
+
+    const task = rows[0];
+
+    // Mark running
+    await pool.query(
+      `UPDATE tasks SET status='running', started_at=NOW() WHERE id=$1`,
+      [task.id]
+    );
+
+    await sendMessage(task.chat_id, `🟡 Running task #${task.id}: ${task.input_text}`);
+
+    // Execute
+    if (task.kind === "zapier") {
+      await sendToZapier(task);
+
+      // Mark as sent (still "running" until callback, OR mark done if you don't want callback)
+      await sendMessage(task.chat_id, `📨 Sent to Zapier. Waiting for completion (task #${task.id})...`);
+    } else {
+      throw new Error(`Unknown task kind: ${task.kind}`);
     }
-  });
+  } catch (err) {
+    console.error("Worker error:", err);
+  } finally {
+    workerRunning = false;
+  }
 }
 
-function getPlainTextFromRichText(richTextArr) {
-  if (!Array.isArray(richTextArr)) return "";
-  return richTextArr.map((t) => t.plain_text || "").join("").trim();
-}
-
-async function notionRecallMemories({ chatId, limit = 5 }) {
-  const result = await notion.databases.query({
-    database_id: NOTION_DATABASE_ID,
-    filter: {
-      property: PROP_CHAT_ID,
-      number: { equals: Number(chatId) }
-    },
-    sorts: [
-      // Prefer your Created column if it exists/filled; else Notion’s internal created_time
-      { property: PROP_CREATED, direction: "descending" }
-    ],
-    page_size: Math.min(Math.max(limit, 1), 20)
-  });
-
-  // If Created sort fails because the property isn't set for older rows, Notion still returns results.
-  // We'll just use the returned order.
-  return result.results.map((page) => {
-    const props = page.properties || {};
-    const title = getPlainTextFromRichText(props[PROP_TITLE]?.title);
-    const text = getPlainTextFromRichText(props[PROP_TEXT]?.rich_text);
-    return {
-      pageId: page.id,
-      title: title || "(untitled)",
-      text: text || ""
-    };
-  });
+function startWorkerLoop() {
+  setInterval(runWorkerOnce, WORKER_INTERVAL_MS);
+  console.log(`✅ Worker loop started (every ${WORKER_INTERVAL_MS} ms)`);
 }
 
 // =========================
@@ -152,19 +183,64 @@ app.get("/setup-webhook", async (req, res) => {
     const webhookUrl = `${PUBLIC_URL}/webhook`;
     const result = await telegramApi("setWebhook", { url: webhookUrl });
 
-    res.status(200).json({
-      message: "Webhook setup attempted",
-      webhookUrl,
-      telegramResult: result
-    });
+    res.status(200).json({ message: "Webhook setup attempted", webhookUrl, telegramResult: result });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err) });
   }
 });
 
+// Zapier -> Moltbot callback (optional but recommended)
+// Add a Zap step: Webhooks by Zapier -> POST to /zapier/callback
+// Include header: x-zapier-secret: <your ZAPIER_SECRET>
+// Body example:
+// { "task_id": 12, "status": "done", "result_text": "Created Notion item XYZ" }
+app.post("/zapier/callback", async (req, res) => {
+  try {
+    const secret = req.header("x-zapier-secret");
+    if (ZAPIER_SECRET && secret !== ZAPIER_SECRET) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { task_id, status, result_text, error_text } = req.body || {};
+    if (!task_id) return res.status(400).json({ error: "Missing task_id" });
+
+    if (status === "done") {
+      await pool.query(
+        `UPDATE tasks SET status='done', result_text=$2, finished_at=NOW() WHERE id=$1`,
+        [task_id, result_text || ""]
+      );
+
+      const { rows } = await pool.query(`SELECT chat_id FROM tasks WHERE id=$1`, [task_id]);
+      if (rows[0]?.chat_id) {
+        await sendMessage(rows[0].chat_id, `✅ Task #${task_id} completed.\n${result_text || ""}`);
+      }
+    } else if (status === "failed") {
+      await pool.query(
+        `UPDATE tasks SET status='failed', error_text=$2, finished_at=NOW() WHERE id=$1`,
+        [task_id, error_text || "Unknown error"]
+      );
+
+      const { rows } = await pool.query(`SELECT chat_id FROM tasks WHERE id=$1`, [task_id]);
+      if (rows[0]?.chat_id) {
+        await sendMessage(rows[0].chat_id, `❌ Task #${task_id} failed.\n${error_text || ""}`);
+      }
+    } else {
+      // allow "running"/"update" messages if you want later
+      await pool.query(
+        `UPDATE tasks SET result_text=$2 WHERE id=$1`,
+        [task_id, result_text || ""]
+      );
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("Callback error:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
 app.post("/webhook", async (req, res) => {
-  // Telegram requires a fast 200 response
   res.sendStatus(200);
 
   try {
@@ -172,76 +248,96 @@ app.post("/webhook", async (req, res) => {
     console.log("Update received:", JSON.stringify(update, null, 2));
 
     const message = update.message;
-    if (!message?.chat?.id || !message?.text) return;
+    if (!message || !message.chat || !message.text) return;
 
     const chatId = message.chat.id;
     const text = message.text.trim();
 
-    // -------------------------
-    // /remember
-    // -------------------------
+    // =========================
+    // COMMANDS
+    // =========================
+    if (text.startsWith("/task")) {
+      const taskText = text.replace("/task", "").trim();
+      if (!taskText) {
+        await sendMessage(chatId, "Usage: /task <what you want done>");
+        return;
+      }
+
+      const { rows } = await pool.query(
+        `INSERT INTO tasks (chat_id, kind, input_text) VALUES ($1, 'zapier', $2) RETURNING id`,
+        [chatId, taskText]
+      );
+
+      await sendMessage(chatId, `📌 Queued task #${rows[0].id}:\n${taskText}`);
+      return;
+    }
+
+    if (text === "/tasks") {
+      const { rows } = await pool.query(
+        `SELECT id, status, input_text, created_at
+         FROM tasks
+         WHERE chat_id=$1
+         ORDER BY created_at DESC
+         LIMIT 10`,
+        [chatId]
+      );
+
+      if (rows.length === 0) {
+        await sendMessage(chatId, "No tasks yet. Try: /task buy oat milk");
+        return;
+      }
+
+      const lines = rows.map(r => `#${r.id} — ${r.status} — ${r.input_text}`);
+      await sendMessage(chatId, `🧾 Recent tasks:\n${lines.join("\n")}`);
+      return;
+    }
+
+    if (text.startsWith("/status")) {
+      const idStr = text.replace("/status", "").trim();
+      const taskId = Number(idStr);
+      if (!taskId) {
+        await sendMessage(chatId, "Usage: /status <task_id>");
+        return;
+      }
+
+      const { rows } = await pool.query(
+        `SELECT id, status, input_text, result_text, error_text
+         FROM tasks
+         WHERE id=$1 AND chat_id=$2`,
+        [taskId, chatId]
+      );
+
+      if (rows.length === 0) {
+        await sendMessage(chatId, `No task found with id #${taskId}`);
+        return;
+      }
+
+      const t = rows[0];
+      await sendMessage(
+        chatId,
+        `📍 Task #${t.id}\nStatus: ${t.status}\nInput: ${t.input_text}\n` +
+        (t.status === "done" ? `Result: ${t.result_text || ""}` : "") +
+        (t.status === "failed" ? `Error: ${t.error_text || ""}` : "")
+      );
+      return;
+    }
+
+    // Keep your /remember behavior if you want:
     if (text.startsWith("/remember")) {
       const memoryText = text.replace("/remember", "").trim();
 
       if (!memoryText) {
-        await sendMessage(chatId, "Send: `/remember something you want me to store`");
+        await sendMessage(chatId, "Send `/remember something you want me to store`");
         return;
       }
 
-      if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
-        await sendMessage(chatId, "⚠️ Notion isn’t configured (missing NOTION_TOKEN or NOTION_DATABASE_ID).");
-        return;
-      }
-
-      try {
-        await notionCreateMemory({ chatId, memoryText });
-        await sendMessage(chatId, `✅ Saved: "${memoryText}"`);
-      } catch (e) {
-        console.error("❌ Notion create error:", e);
-        await sendMessage(chatId, `❌ Notion error saving memory. Check Railway logs + NOTION_DATABASE_ID format.`);
-      }
+      await pool.query("INSERT INTO memories (chat_id, text) VALUES ($1, $2)", [chatId, memoryText]);
+      await sendMessage(chatId, `✅ Saved: "${memoryText}"`);
       return;
     }
 
-    // -------------------------
-    // /recall
-    // Optional: /recall 10
-    // -------------------------
-    if (text.startsWith("/recall")) {
-      if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
-        await sendMessage(chatId, "⚠️ Notion isn’t configured (missing NOTION_TOKEN or NOTION_DATABASE_ID).");
-        return;
-      }
-
-      const parts = text.split(" ").map((p) => p.trim()).filter(Boolean);
-      const limit = parts[1] ? Number(parts[1]) : 5;
-
-      try {
-        const memories = await notionRecallMemories({ chatId, limit: Number.isFinite(limit) ? limit : 5 });
-
-        if (!memories.length) {
-          await sendMessage(chatId, "📌 No memories saved yet for this chat.");
-          return;
-        }
-
-        // Show latest first
-        const lines = memories.map((m, idx) => {
-          // Use the stored Text primarily; fallback to title
-          const content = m.text || m.title;
-          // Include Notion page id at end so you can delete later if you want
-          return `#${idx + 1} — ${content}\n(id: ${m.pageId})`;
-        });
-
-        await sendMessage(chatId, `📌 Recall (latest):\n\n${lines.join("\n\n")}`);
-      } catch (e) {
-        console.error("❌ Notion recall error:", e);
-        await sendMessage(chatId, "❌ Notion error recalling memories. Check Railway logs.");
-      }
-      return;
-    }
-
-    // Default behavior (keep your bot responsive)
-    await sendMessage(chatId, `👋 Summit here.\nI received: "${text}"`);
+    // Default
+    await sendMessage(chatId, `👋 Summit here.\nTry:\n/task <something>\n/tasks\n/status <id>`);
   } catch (err) {
     console.error("Webhook handler error:", err);
   }
@@ -250,4 +346,13 @@ app.post("/webhook", async (req, res) => {
 // =========================
 // Start
 // =========================
-app.listen(PORT, () => console.log(`✅ Server listening on ${PORT}`));
+initDb()
+  .then(() => {
+    app.listen(PORT, () => console.log(`✅ Server listening on ${PORT}`));
+    startWorkerLoop();
+  })
+  .catch((err) => {
+    console.error("❌ Failed to init DB:", err);
+    app.listen(PORT, () => console.log(`⚠️ Server listening on ${PORT} (DB init failed)`));
+    startWorkerLoop();
+  });
