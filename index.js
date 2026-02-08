@@ -10,12 +10,14 @@ app.use(express.json());
 // ENV
 // =========================
 const PORT = process.env.PORT || 8080;
+
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const PUBLIC_URL = process.env.PUBLIC_URL; // e.g. https://moltbot-server-production.up.railway.app
+
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
 const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 
-// Basic validation (won’t crash deploy)
+// Helpful warnings (won't crash deploy)
 if (!TELEGRAM_BOT_TOKEN) console.warn("⚠️ Missing TELEGRAM_BOT_TOKEN");
 if (!PUBLIC_URL) console.warn("⚠️ Missing PUBLIC_URL");
 if (!NOTION_TOKEN) console.warn("⚠️ Missing NOTION_TOKEN");
@@ -30,11 +32,13 @@ const notion = new Client({ auth: NOTION_TOKEN });
 // Telegram Helpers
 // =========================
 async function telegramApi(method, payload) {
+  if (!TELEGRAM_BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN");
+
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payload)
   });
 
   const data = await res.json();
@@ -49,71 +53,73 @@ async function sendMessage(chatId, text) {
 // =========================
 // Notion Helpers
 // =========================
-function nowIso() {
-  return new Date().toISOString();
+function toTitle(text, max = 60) {
+  const cleaned = (text || "").trim().replace(/\s+/g, " ");
+  if (cleaned.length <= max) return cleaned || "Memory";
+  return cleaned.slice(0, max - 1) + "…";
 }
 
-// Creates a Notion page in your Memory database
-async function saveMemoryToNotion({ chatId, text }) {
-  // Minimal “Name” title + other properties
-  const page = await notion.pages.create({
+// Creates a row in your Notion database
+async function notionSaveMemory({ chatId, memoryText }) {
+  if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
+    throw new Error("Missing NOTION_TOKEN or NOTION_DATABASE_ID");
+  }
+
+  // These property names MUST match your Notion database column names:
+  // Title (title), Type (select), Chat ID (number), Text (rich_text)
+  return notion.pages.create({
     parent: { database_id: NOTION_DATABASE_ID },
     properties: {
-      Name: {
-        title: [{ text: { content: text.slice(0, 80) || "Memory" } }],
+      Title: {
+        title: [{ text: { content: toTitle(memoryText) } }]
       },
       Type: {
-        select: { name: "memory" },
+        select: { name: "memory" }
       },
-      ChatId: {
-        number: Number(chatId),
+      "Chat ID": {
+        number: Number(chatId)
       },
       Text: {
-        rich_text: [{ text: { content: text } }],
-      },
-      Created: {
-        date: { start: nowIso() },
-      },
-    },
+        rich_text: [{ text: { content: memoryText } }]
+      }
+    }
   });
-
-  return page;
 }
 
-// Fetch latest memories for a chatId
-async function recallMemoriesFromNotion({ chatId, limit = 10 }) {
-  const result = await notion.databases.query({
+// Pull latest N memories for a chatId
+async function notionRecallMemories({ chatId, limit = 10 }) {
+  if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
+    throw new Error("Missing NOTION_TOKEN or NOTION_DATABASE_ID");
+  }
+
+  const resp = await notion.databases.query({
     database_id: NOTION_DATABASE_ID,
-    page_size: limit,
     filter: {
-      property: "ChatId",
-      number: { equals: Number(chatId) },
+      property: "Chat ID",
+      number: { equals: Number(chatId) }
     },
     sorts: [
-      {
-        property: "Created",
-        direction: "descending",
-      },
+      { timestamp: "created_time", direction: "descending" }
     ],
+    page_size: limit
   });
 
-  // Extract useful text from the “Text” property
-  const items = result.results.map((page) => {
-    const pageId = page.id;
+  // Extract text from the "Text" property
+  const items = resp.results.map((page) => {
+    const props = page.properties || {};
+    const textProp = props["Text"];
 
-    const textProp = page.properties?.Text;
     let text = "";
-
     if (textProp?.type === "rich_text") {
       text = (textProp.rich_text || [])
-        .map((t) => t.plain_text || "")
+        .map((rt) => rt.plain_text || "")
         .join("")
         .trim();
     }
 
-    // If missing, fallback to title
+    // Fallback to Title if needed
     if (!text) {
-      const titleProp = page.properties?.Name;
+      const titleProp = props["Title"];
       if (titleProp?.type === "title") {
         text = (titleProp.title || [])
           .map((t) => t.plain_text || "")
@@ -122,38 +128,26 @@ async function recallMemoriesFromNotion({ chatId, limit = 10 }) {
       }
     }
 
-    // Short id for display (last 6 chars)
-    const shortId = pageId.replace(/-/g, "").slice(-6);
-
-    return { pageId, shortId, text: text || "(empty)" };
+    return { id: page.id, text: text || "(empty)" };
   });
 
   return items;
 }
 
-async function countMemoriesInNotion({ chatId }) {
-  // Notion doesn’t give a “count only” query,
-  // but we can page through if needed.
-  // For now: grab up to 100 and count results.
-  const result = await notion.databases.query({
+// Count memories for /status
+async function notionCountMemories({ chatId }) {
+  // Notion doesn't provide "count" directly; quick workaround:
+  // Query up to 100 and count results. Good enough for now.
+  const resp = await notion.databases.query({
     database_id: NOTION_DATABASE_ID,
-    page_size: 100,
     filter: {
-      property: "ChatId",
-      number: { equals: Number(chatId) },
+      property: "Chat ID",
+      number: { equals: Number(chatId) }
     },
+    page_size: 100
   });
 
-  return result.results.length;
-}
-
-// Optional: delete by Notion pageId (full id)
-async function deleteMemoryFromNotion(pageId) {
-  // Notion “delete” is archive
-  return notion.pages.update({
-    page_id: pageId,
-    archived: true,
-  });
+  return resp.results.length;
 }
 
 // =========================
@@ -176,7 +170,7 @@ app.get("/setup-webhook", async (req, res) => {
     res.status(200).json({
       message: "Webhook setup attempted",
       webhookUrl,
-      telegramResult: result,
+      telegramResult: result
     });
   } catch (err) {
     console.error(err);
@@ -198,75 +192,51 @@ app.post("/webhook", async (req, res) => {
     const chatId = message.chat.id;
     const text = message.text.trim();
 
-    // =========================
+    // -------------------------
     // Commands
-    // =========================
-
+    // -------------------------
     if (text.startsWith("/remember")) {
       const memoryText = text.replace("/remember", "").trim();
 
       if (!memoryText) {
-        await sendMessage(chatId, "Usage: /remember <something you want me to store>");
+        await sendMessage(chatId, "Send: /remember something you want me to store");
         return;
       }
 
-      if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
-        await sendMessage(chatId, "⚠️ Notion is not configured (missing NOTION_TOKEN or NOTION_DATABASE_ID).");
-        return;
-      }
-
-      const page = await saveMemoryToNotion({ chatId, text: memoryText });
-      const shortId = page.id.replace(/-/g, "").slice(-6);
-
-      await sendMessage(chatId, `✅ Saved to Notion (#${shortId}): "${memoryText}"`);
+      await notionSaveMemory({ chatId, memoryText });
+      await sendMessage(chatId, `✅ Saved: "${memoryText}"`);
       return;
     }
 
     if (text === "/recall") {
-      if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
-        await sendMessage(chatId, "⚠️ Notion is not configured (missing NOTION_TOKEN or NOTION_DATABASE_ID).");
+      const memories = await notionRecallMemories({ chatId, limit: 10 });
+
+      if (!memories.length) {
+        await sendMessage(chatId, "📌 No memories saved yet for this chat.");
         return;
       }
 
-      const items = await recallMemoriesFromNotion({ chatId, limit: 10 });
-
-      if (!items.length) {
-        await sendMessage(chatId, "📭 No memories saved yet for this chat.");
-        return;
-      }
-
-      const lines = items.map((m, i) => `#${i + 1} — ${m.text}\n(id: ${m.shortId})`);
-      await sendMessage(chatId, `📌 Recall (latest):\n\n${lines.join("\n\n")}\n\nTip: /remember <text>`);
+      const lines = memories.map((m, i) => `#${i + 1} — ${m.text}`);
+      await sendMessage(chatId, `📌 Recall (latest):\n\n${lines.join("\n")}`);
       return;
     }
 
     if (text === "/status") {
-      if (!NOTION_TOKEN || !NOTION_DATABASE_ID) {
-        await sendMessage(chatId, "⚠️ Notion is not configured (missing NOTION_TOKEN or NOTION_DATABASE_ID).");
-        return;
-      }
-
-      const count = await countMemoriesInNotion({ chatId });
-      await sendMessage(chatId, `📌 Memories saved for this chat (Notion): ${count}`);
+      const count = await notionCountMemories({ chatId });
+      await sendMessage(chatId, `📌 Memories saved for this chat: ${count}`);
       return;
     }
 
-    // Optional: /forget <FULL_NOTION_PAGE_ID>
-    // (Notion requires the full page id; we’re not doing index-based forget yet.)
-    if (text.startsWith("/forget")) {
-      const arg = text.replace("/forget", "").trim();
-
-      await sendMessage(
-        chatId,
-        `⏸️ Forget is not enabled right now.\n\nWhen you’re ready, we can implement:\n- /forget <id>\n- /forget 2 (based on last recall)\n- safe confirmation prompts`
-      );
-      return;
-    }
-
-    // Default behavior
+    // Default echo
     await sendMessage(chatId, `👋 Summit here.\nI received: "${text}"`);
   } catch (err) {
     console.error("Webhook handler error:", err);
+    try {
+      // Try to notify you in Telegram if possible
+      const msg = req?.body?.message;
+      const chatId = msg?.chat?.id;
+      if (chatId) await sendMessage(chatId, `❌ Error: ${String(err)}`);
+    } catch (_) {}
   }
 });
 
