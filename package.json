@@ -1,7 +1,7 @@
 {
   "name": "moltbot-server",
   "version": "1.0.0",
-  "description": "Hosted server for Moltbot (Telegram + Notion memory)",
+  "description": "Hosted server for Moltbot",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
